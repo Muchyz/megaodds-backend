@@ -23,8 +23,8 @@ app.use(
   })
 );
 
-// 🔑 IMPORTANT: handle preflight requests
-app.options("*", cors());
+// ✅ FIXED: Express 5 wildcard (NO "*")
+app.options("/*", cors());
 
 app.use(express.json());
 
@@ -84,8 +84,9 @@ const verifyToken = (req, res, next) => {
 };
 
 const isAdmin = (req, res, next) => {
-  if (!req.user.is_admin)
+  if (!req.user.is_admin) {
     return res.status(403).json({ message: "Admin only" });
+  }
   next();
 };
 
@@ -99,7 +100,7 @@ app.post("/register", async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
 
     db.query(
-      "INSERT INTO users (email, password) VALUES (?,?)",
+      "INSERT INTO users (email, password) VALUES (?, ?)",
       [email, hash],
       (err) => {
         if (err) {
@@ -118,7 +119,7 @@ app.post("/login", (req, res) => {
   const { email, password } = req.body;
 
   db.query(
-    "SELECT * FROM users WHERE email=?",
+    "SELECT * FROM users WHERE email = ?",
     [email],
     async (err, rows) => {
       if (err) {
@@ -158,8 +159,9 @@ app.post("/login", (req, res) => {
 
 // GET (VIP)
 app.get("/features", verifyToken, (req, res) => {
-  if (!req.user.is_vip)
+  if (!req.user.is_vip) {
     return res.status(403).json({ message: "VIP only" });
+  }
 
   db.query("SELECT * FROM features ORDER BY id DESC", (err, rows) => {
     if (err) return res.status(500).json({ message: "DB error" });
@@ -178,7 +180,7 @@ app.post(
     const image_url = req.file?.path || null;
 
     db.query(
-      "INSERT INTO features (title, description, image_url) VALUES (?,?,?)",
+      "INSERT INTO features (title, description, image_url) VALUES (?, ?, ?)",
       [title, description, image_url],
       (err) => {
         if (err) return res.status(500).json({ message: "Create failed" });
@@ -227,7 +229,7 @@ app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
 app.get("/", (_, res) => res.send("🚀 API running"));
 
 /* =======================
-   START
+   START (Render fix)
 ======================= */
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🔥 Server running on port ${PORT}`);
