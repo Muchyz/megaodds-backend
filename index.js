@@ -17,11 +17,15 @@ const PORT = process.env.PORT || 5000;
 app.use(
   cors({
     origin: "https://megaodds.vercel.app",
+    credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true
   })
 );
+
+// 🔑 IMPORTANT: handle preflight requests
+app.options("*", cors());
+
 app.use(express.json());
 
 /* =======================
@@ -56,8 +60,9 @@ const db = mysql.createPool({
 });
 
 db.getConnection((err, conn) => {
-  if (err) console.error("❌ DB error:", err.message);
-  else {
+  if (err) {
+    console.error("❌ DB error:", err.message);
+  } else {
     console.log("✅ Connected to Railway MySQL");
     conn.release();
   }
@@ -89,38 +94,62 @@ const isAdmin = (req, res, next) => {
 ======================= */
 app.post("/register", async (req, res) => {
   const { email, password } = req.body;
-  const hash = await bcrypt.hash(password, 10);
 
-  db.query(
-    "INSERT INTO users (email, password) VALUES (?,?)",
-    [email, hash],
-    err => {
-      if (err) return res.status(409).json({ message: "User exists" });
-      res.json({ message: "Registered" });
-    }
-  );
+  try {
+    const hash = await bcrypt.hash(password, 10);
+
+    db.query(
+      "INSERT INTO users (email, password) VALUES (?,?)",
+      [email, hash],
+      (err) => {
+        if (err) {
+          console.error("Register error:", err);
+          return res.status(409).json({ message: "User exists" });
+        }
+        res.json({ message: "Registered" });
+      }
+    );
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
 app.post("/login", (req, res) => {
   const { email, password } = req.body;
 
-  db.query("SELECT * FROM users WHERE email=?", [email], async (err, rows) => {
-    if (!rows?.length)
-      return res.status(401).json({ message: "Invalid credentials" });
+  db.query(
+    "SELECT * FROM users WHERE email=?",
+    [email],
+    async (err, rows) => {
+      if (err) {
+        console.error("Login DB error:", err);
+        return res.status(500).json({ message: "Server error" });
+      }
 
-    const user = rows[0];
-    const ok = await bcrypt.compare(password, user.password);
-    if (!ok)
-      return res.status(401).json({ message: "Invalid credentials" });
+      if (!rows.length) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
 
-    const token = jwt.sign(
-      { id: user.id, is_vip: user.is_vip, is_admin: user.is_admin },
-      process.env.JWT_SECRET,
-      { expiresIn: "1d" }
-    );
+      const user = rows[0];
+      const ok = await bcrypt.compare(password, user.password);
 
-    res.json({ token, is_vip: user.is_vip });
-  });
+      if (!ok) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+
+      const token = jwt.sign(
+        {
+          id: user.id,
+          is_vip: user.is_vip,
+          is_admin: user.is_admin,
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "1d" }
+      );
+
+      res.json({ token, is_vip: user.is_vip });
+    }
+  );
 });
 
 /* =======================
@@ -151,7 +180,7 @@ app.post(
     db.query(
       "INSERT INTO features (title, description, image_url) VALUES (?,?,?)",
       [title, description, image_url],
-      err => {
+      (err) => {
         if (err) return res.status(500).json({ message: "Create failed" });
         res.json({ message: "Feature added" });
       }
@@ -177,7 +206,7 @@ app.put(
       ? [title, description, image_url, req.params.id]
       : [title, description, req.params.id];
 
-    db.query(sql, values, err => {
+    db.query(sql, values, (err) => {
       if (err) return res.status(500).json({ message: "Update failed" });
       res.json({ message: "Feature updated" });
     });
@@ -186,7 +215,7 @@ app.put(
 
 // DELETE
 app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
-  db.query("DELETE FROM features WHERE id=?", [req.params.id], err => {
+  db.query("DELETE FROM features WHERE id=?", [req.params.id], (err) => {
     if (err) return res.status(500).json({ message: "Delete failed" });
     res.json({ message: "Feature deleted" });
   });
@@ -200,6 +229,6 @@ app.get("/", (_, res) => res.send("🚀 API running"));
 /* =======================
    START
 ======================= */
-app.listen(PORT, () =>
-  console.log(`🔥 Server running on port ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🔥 Server running on port ${PORT}`);
+});
