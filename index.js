@@ -23,8 +23,7 @@ app.use(
   })
 );
 
-// ✅ FIXED: Express 5 wildcard (NO "*")
-app.options("/*", cors());
+
 
 app.use(express.json());
 
