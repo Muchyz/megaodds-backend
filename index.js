@@ -23,8 +23,6 @@ app.use(
   })
 );
 
-
-
 app.use(express.json());
 
 /* =======================
@@ -68,7 +66,7 @@ db.getConnection((err, conn) => {
 });
 
 /* =======================
-   JWT
+   JWT MIDDLEWARE
 ======================= */
 const verifyToken = (req, res, next) => {
   const auth = req.headers.authorization;
@@ -78,12 +76,13 @@ const verifyToken = (req, res, next) => {
     req.user = jwt.verify(auth.split(" ")[1], process.env.JWT_SECRET);
     next();
   } catch {
-    res.status(401).json({ message: "Invalid token" });
+    return res.status(401).json({ message: "Invalid token" });
   }
 };
 
+/* ✅ FIXED ADMIN CHECK */
 const isAdmin = (req, res, next) => {
-  if (!req.user.is_admin) {
+  if (Number(req.user.is_admin) !== 1) {
     return res.status(403).json({ message: "Admin only" });
   }
   next();
@@ -103,13 +102,12 @@ app.post("/register", async (req, res) => {
       [email, hash],
       (err) => {
         if (err) {
-          console.error("Register error:", err);
           return res.status(409).json({ message: "User exists" });
         }
         res.json({ message: "Registered" });
       }
     );
-  } catch (err) {
+  } catch {
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -121,21 +119,14 @@ app.post("/login", (req, res) => {
     "SELECT * FROM users WHERE email = ?",
     [email],
     async (err, rows) => {
-      if (err) {
-        console.error("Login DB error:", err);
-        return res.status(500).json({ message: "Server error" });
-      }
-
-      if (!rows.length) {
+      if (err) return res.status(500).json({ message: "Server error" });
+      if (!rows.length)
         return res.status(401).json({ message: "Invalid credentials" });
-      }
 
       const user = rows[0];
       const ok = await bcrypt.compare(password, user.password);
-
-      if (!ok) {
+      if (!ok)
         return res.status(401).json({ message: "Invalid credentials" });
-      }
 
       const token = jwt.sign(
         {
@@ -156,9 +147,9 @@ app.post("/login", (req, res) => {
    FEATURES
 ======================= */
 
-// GET (VIP)
+/* ✅ FIXED VIP CHECK */
 app.get("/features", verifyToken, (req, res) => {
-  if (!req.user.is_vip) {
+  if (Number(req.user.is_vip) !== 1) {
     return res.status(403).json({ message: "VIP only" });
   }
 
@@ -168,7 +159,7 @@ app.get("/features", verifyToken, (req, res) => {
   });
 });
 
-// CREATE (ADMIN)
+/* CREATE (ADMIN) */
 app.post(
   "/features",
   verifyToken,
@@ -176,20 +167,21 @@ app.post(
   upload.single("image"),
   (req, res) => {
     const { title, description } = req.body;
-    const image_url = req.file?.path || null;
+    const image_url = req.file ? req.file.path : null;
 
     db.query(
       "INSERT INTO features (title, description, image_url) VALUES (?, ?, ?)",
       [title, description, image_url],
       (err) => {
-        if (err) return res.status(500).json({ message: "Create failed" });
+        if (err)
+          return res.status(500).json({ message: "Create failed" });
         res.json({ message: "Feature added" });
       }
     );
   }
 );
 
-// UPDATE
+/* UPDATE */
 app.put(
   "/features/:id",
   verifyToken,
@@ -208,16 +200,18 @@ app.put(
       : [title, description, req.params.id];
 
     db.query(sql, values, (err) => {
-      if (err) return res.status(500).json({ message: "Update failed" });
+      if (err)
+        return res.status(500).json({ message: "Update failed" });
       res.json({ message: "Feature updated" });
     });
   }
 );
 
-// DELETE
+/* DELETE */
 app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
   db.query("DELETE FROM features WHERE id=?", [req.params.id], (err) => {
-    if (err) return res.status(500).json({ message: "Delete failed" });
+    if (err)
+      return res.status(500).json({ message: "Delete failed" });
     res.json({ message: "Feature deleted" });
   });
 });
@@ -228,7 +222,7 @@ app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
 app.get("/", (_, res) => res.send("🚀 API running"));
 
 /* =======================
-   START (Render fix)
+   START
 ======================= */
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🔥 Server running on port ${PORT}`);
