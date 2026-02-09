@@ -96,7 +96,6 @@ const isAdmin = (req, res, next) => {
 app.post("/register", async (req, res) => {
   const { email, password } = req.body;
 
-  // ✅ Input validation
   if (!email || !password) {
     return res.status(400).json({ message: "Email and password are required" });
   }
@@ -126,7 +125,6 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  // ✅ Input validation
   if (!email || !password) {
     return res.status(400).json({ message: "Email and password are required" });
   }
@@ -203,6 +201,119 @@ app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
   db.query("DELETE FROM features WHERE id=?", [req.params.id], (err) => {
     if (err) return res.status(500).json({ message: "Delete failed" });
     res.json({ message: "Feature deleted" });
+  });
+});
+
+/* =======================
+   PICKS ROUTES
+======================= */
+
+// Get yesterday's picks (PUBLIC)
+app.get("/api/picks/yesterday", (req, res) => {
+  db.query(
+    "SELECT * FROM picks WHERE pick_type = 'yesterday' ORDER BY created_at DESC",
+    (err, rows) => {
+      if (err) {
+        console.error("DB error:", err);
+        return res.status(500).json({ message: "DB error" });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+// Get today's picks (PUBLIC)
+app.get("/api/picks/today", (req, res) => {
+  db.query(
+    "SELECT * FROM picks WHERE pick_type = 'today' ORDER BY created_at DESC",
+    (err, rows) => {
+      if (err) {
+        console.error("DB error:", err);
+        return res.status(500).json({ message: "DB error" });
+      }
+      res.json(rows);
+    }
+  );
+});
+
+// Get single pick by ID (PUBLIC)
+app.get("/api/picks/:id", (req, res) => {
+  db.query("SELECT * FROM picks WHERE id = ?", [req.params.id], (err, rows) => {
+    if (err) {
+      console.error("DB error:", err);
+      return res.status(500).json({ message: "DB error" });
+    }
+    if (!rows.length) {
+      return res.status(404).json({ message: "Pick not found" });
+    }
+    res.json(rows[0]);
+  });
+});
+
+// Create new pick (ADMIN ONLY)
+app.post("/api/picks", verifyToken, isAdmin, (req, res) => {
+  const { team1, team2, time, prediction, odds, status, isVIP, pickType } = req.body;
+
+  // Validation
+  if (!team1 || !team2 || !time || !pickType) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  // If VIP, lock prediction and odds
+  const finalPrediction = isVIP ? "Locked" : prediction;
+  const finalOdds = isVIP ? "--" : odds;
+
+  db.query(
+    "INSERT INTO picks (team1, team2, time, prediction, odds, status, is_vip, pick_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [team1, team2, time, finalPrediction, finalOdds, status || "Pending", isVIP ? 1 : 0, pickType],
+    (err, result) => {
+      if (err) {
+        console.error("Create pick error:", err);
+        return res.status(500).json({ message: "Failed to create pick" });
+      }
+      res.status(201).json({ 
+        message: "Pick created successfully",
+        id: result.insertId 
+      });
+    }
+  );
+});
+
+// Update pick (ADMIN ONLY)
+app.put("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
+  const { team1, team2, time, prediction, odds, status, isVIP } = req.body;
+
+  // If VIP, lock prediction and odds
+  const finalPrediction = isVIP ? "Locked" : prediction;
+  const finalOdds = isVIP ? "--" : odds;
+
+  db.query(
+    "UPDATE picks SET team1=?, team2=?, time=?, prediction=?, odds=?, status=?, is_vip=? WHERE id=?",
+    [team1, team2, time, finalPrediction, finalOdds, status, isVIP ? 1 : 0, req.params.id],
+    (err, result) => {
+      if (err) {
+        console.error("Update pick error:", err);
+        return res.status(500).json({ message: "Failed to update pick" });
+      }
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "Pick not found" });
+      }
+      res.json({ message: "Pick updated successfully" });
+    }
+  );
+});
+
+// Delete pick (ADMIN ONLY)
+app.delete("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
+  db.query("DELETE FROM picks WHERE id=?", [req.params.id], (err, result) => {
+    if (err) {
+      console.error("Delete pick error:", err);
+      return res.status(500).json({ message: "Failed to delete pick" });
+    }
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Pick not found" });
+    }
+    res.json({ message: "Pick deleted successfully" });
   });
 });
 
