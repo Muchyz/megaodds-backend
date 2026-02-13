@@ -124,10 +124,11 @@ try {
 
 /* =======================
    INTASEND CONFIG
+   ✅ FIXED: Correct API base URL
 ======================= */
 const INTASEND_SECRET_KEY = process.env.INTASEND_SECRET_KEY;
 const INTASEND_PUBLISHABLE_KEY = process.env.INTASEND_PUBLISHABLE_KEY;
-const INTASEND_API_URL = "https://payment.intasend.com/api/v1";
+const INTASEND_API_URL = "https://api.intasend.com/api/v1"; // ✅ FIXED (was payment.intasend.com)
 
 if (INTASEND_SECRET_KEY) {
   console.log('✅ Intasend configured');
@@ -414,18 +415,21 @@ app.delete("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
 /* =======================
    INTASEND PAYMENT ROUTES
 ======================= */
+
+// POST /api/payment/initiate
 app.post("/api/payment/initiate", verifyToken, async (req, res) => {
   console.log('💳 Payment initiation request received');
-  
+
   const { amount, phone_number, plan_name } = req.body;
 
   if (!amount || !phone_number || !plan_name) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      message: "Missing required fields" 
+      message: "Missing required fields"
     });
   }
 
+  // Format phone number to 254XXXXXXXXX
   let formattedPhone = phone_number.replace(/[\s\+]/g, '');
   if (formattedPhone.startsWith('0')) {
     formattedPhone = '254' + formattedPhone.substring(1);
@@ -435,16 +439,20 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
   }
 
   if (!/^254[17]\d{8}$/.test(formattedPhone)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      message: "Invalid phone number format" 
+      message: "Invalid phone number format. Use 07XXXXXXXX or 254XXXXXXXXX"
     });
   }
 
   try {
     const apiRef = `MEGA-${Date.now()}-${req.user.id}`;
 
-    console.log('📞 Calling Intasend API...');
+    console.log('📞 Calling Intasend STK Push API...');
+    console.log('📱 Phone:', formattedPhone);
+    console.log('💰 Amount:', amount);
+
+    // ✅ FIXED: Correct Intasend API URL (api.intasend.com not payment.intasend.com)
     const response = await axios.post(
       `${INTASEND_API_URL}/payment/mpesa-stk-push/`,
       {
@@ -463,67 +471,86 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
       }
     );
 
-    console.log('✅ Intasend response:', response.data);
+    console.log('✅ Intasend STK response:', JSON.stringify(response.data));
 
+    const invoiceId = response.data.invoice?.invoice_id || response.data.id;
+
+    // Store payment record in DB
     db.query(
       "INSERT INTO payments (user_id, amount, phone_number, plan_name, invoice_id, api_ref, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [
-        req.user.id, 
-        amount, 
-        formattedPhone, 
-        plan_name, 
-        response.data.invoice?.invoice_id || response.data.id,
-        apiRef,
-        'PENDING'
-      ],
+      [req.user.id, amount, formattedPhone, plan_name, invoiceId, apiRef, 'PENDING'],
       (err) => {
-        if (err) console.error("Payment storage error:", err);
+        if (err) console.error("⚠️ Payment storage error:", err.message);
+        else console.log('✅ Payment record saved, invoice_id:', invoiceId);
       }
     );
 
     res.json({
       success: true,
       message: "STK Push sent successfully",
-      invoice_id: response.data.invoice?.invoice_id || response.data.id,
+      invoice_id: invoiceId,
       tracking_id: response.data.id,
       api_ref: apiRef
     });
 
   } catch (error) {
-    console.error("💥 Intasend error:", error.response?.data || error.message);
-    
-    res.status(500).json({ 
+    // ✅ Enhanced error logging so you can see exactly what Intasend returns
+    console.error("💥 Intasend error status:", error.response?.status);
+    console.error("💥 Intasend error data:", JSON.stringify(error.response?.data));
+    console.error("💥 Intasend error message:", error.message);
+
+    res.status(500).json({
       success: false,
-      message: error.response?.data?.error || error.response?.data?.detail || "Payment initiation failed"
+      message:
+        error.response?.data?.error ||
+        error.response?.data?.detail ||
+        error.response?.data?.message ||
+        "Payment initiation failed. Please try again."
     });
   }
 });
 
+// GET /api/payment/status/:invoice_id
 app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
   try {
-    const response = await axios.get(
+    console.log('🔍 Checking payment status for invoice:', req.params.invoice_id);
+
+    // ✅ FIXED: Intasend status check is POST not GET, with body not query params
+    const response = await axios.post(
       `${INTASEND_API_URL}/payment/status/`,
+      { invoice_id: req.params.invoice_id },
       {
-        params: { invoice_id: req.params.invoice_id },
-        headers: { "Authorization": `Bearer ${INTASEND_SECRET_KEY}` },
+        headers: {
+          "Authorization": `Bearer ${INTASEND_SECRET_KEY}`,
+          "Content-Type": "application/json"
+        },
         timeout: 15000
       }
     );
 
+    console.log('✅ Status response:', JSON.stringify(response.data));
+
     const paymentState = response.data.invoice?.state || response.data.state;
 
     if (paymentState === 'COMPLETE' || paymentState === 'COMPLETED') {
+      // Update payment record
       db.query(
         "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ?",
-        [req.params.invoice_id]
+        [req.params.invoice_id],
+        (err) => {
+          if (err) console.error("⚠️ Payment update error:", err.message);
+        }
       );
 
+      // Upgrade user to VIP
       db.query(
         "UPDATE users SET is_vip = 1 WHERE id = ?",
-        [req.user.id]
+        [req.user.id],
+        (err) => {
+          if (err) console.error("⚠️ VIP upgrade error:", err.message);
+          else console.log(`✅ User ${req.user.id} upgraded to VIP`);
+        }
       );
-
-      console.log(`✅ User ${req.user.id} upgraded to VIP`);
     }
 
     res.json({
@@ -533,19 +560,23 @@ app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Status check error:", error.message);
-    res.status(500).json({ 
+    console.error("💥 Status check error status:", error.response?.status);
+    console.error("💥 Status check error data:", JSON.stringify(error.response?.data));
+    console.error("💥 Status check error message:", error.message);
+
+    res.status(500).json({
       success: false,
-      message: "Failed to check payment status" 
+      message: "Failed to check payment status"
     });
   }
 });
 
-app.post("/api/payment/webhook", express.raw({type: 'application/json'}), (req, res) => {
+// POST /api/payment/webhook
+app.post("/api/payment/webhook", express.raw({ type: 'application/json' }), (req, res) => {
   try {
     const event = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    
-    console.log("📥 Webhook received:", event);
+
+    console.log("📥 Webhook received:", JSON.stringify(event));
 
     const invoiceId = event.invoice?.invoice_id || event.invoice_id;
     const state = event.invoice?.state || event.state;
@@ -554,7 +585,10 @@ app.post("/api/payment/webhook", express.raw({type: 'application/json'}), (req, 
     if (state === 'COMPLETE' || state === 'COMPLETED') {
       db.query(
         "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ? OR api_ref = ?",
-        [invoiceId, apiRef]
+        [invoiceId, apiRef],
+        (err) => {
+          if (err) console.error("⚠️ Webhook payment update error:", err.message);
+        }
       );
 
       db.query(
@@ -562,8 +596,14 @@ app.post("/api/payment/webhook", express.raw({type: 'application/json'}), (req, 
         [invoiceId, apiRef],
         (err, rows) => {
           if (!err && rows.length > 0) {
-            db.query("UPDATE users SET is_vip = 1 WHERE id = ?", [rows[0].user_id]);
-            console.log(`✅ User ${rows[0].user_id} upgraded via webhook`);
+            db.query(
+              "UPDATE users SET is_vip = 1 WHERE id = ?",
+              [rows[0].user_id],
+              (err2) => {
+                if (err2) console.error("⚠️ Webhook VIP upgrade error:", err2.message);
+                else console.log(`✅ User ${rows[0].user_id} upgraded via webhook`);
+              }
+            );
           }
         }
       );
@@ -571,11 +611,12 @@ app.post("/api/payment/webhook", express.raw({type: 'application/json'}), (req, 
 
     res.status(200).json({ received: true });
   } catch (error) {
-    console.error("Webhook error:", error);
+    console.error("💥 Webhook error:", error.message);
     res.status(500).json({ error: "Webhook processing failed" });
   }
 });
 
+// GET /api/payment/history
 app.get("/api/payment/history", verifyToken, (req, res) => {
   db.query(
     "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC",
@@ -595,7 +636,7 @@ app.get("/api/payment/history", verifyToken, (req, res) => {
 ======================= */
 app.use((err, req, res, next) => {
   console.error('💥 Express error:', err);
-  res.status(500).json({ 
+  res.status(500).json({
     message: "Internal server error",
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
