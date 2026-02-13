@@ -1,3 +1,32 @@
+// ==========================================
+// MEGA-ODDS BACKEND WITH M-PESA INTEGRATION
+// Production-Ready with Error Handling
+// ==========================================
+
+// Error handlers FIRST
+process.on('uncaughtException', (error) => {
+  console.error('💥 UNCAUGHT EXCEPTION:', error.message);
+  console.error('Stack:', error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION:', reason);
+});
+
+// Load environment variables
+require("dotenv").config();
+
+console.log('🚀 Starting Mega-Odds Backend...');
+console.log('📅 Time:', new Date().toISOString());
+
+// Verify critical env vars
+const criticalVars = ['DB_HOST', 'JWT_SECRET', 'INTASEND_SECRET_KEY'];
+const missingVars = criticalVars.filter(v => !process.env[v]);
+if (missingVars.length > 0) {
+  console.error('❌ Missing environment variables:', missingVars.join(', '));
+  console.error('⚠️  Server may not function correctly!');
+}
+
 const express = require("express");
 const mysql = require("mysql2");
 const cors = require("cors");
@@ -7,7 +36,6 @@ const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const axios = require("axios");
-require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -17,54 +45,82 @@ const PORT = process.env.PORT || 5000;
 ======================= */
 app.use(
   cors({
-    origin: "https://megaodds.vercel.app",
+    origin: [
+      "https://megaodds.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:5173"
+    ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
+// Handle preflight
+app.options('*', cors());
+
 app.use(express.json());
+
+// Request logging
+app.use((req, res, next) => {
+  console.log(`📨 ${req.method} ${req.path}`);
+  next();
+});
 
 /* =======================
    CLOUDINARY CONFIG
 ======================= */
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+if (process.env.CLOUDINARY_CLOUD_NAME) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
 
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: "vip-features",
-    allowed_formats: ["jpg", "png", "jpeg", "webp"],
-  },
-});
+  const storage = new CloudinaryStorage({
+    cloudinary,
+    params: {
+      folder: "vip-features",
+      allowed_formats: ["jpg", "png", "jpeg", "webp"],
+    },
+  });
 
-const upload = multer({ storage });
+  var upload = multer({ storage });
+  console.log('✅ Cloudinary configured');
+} else {
+  console.log('⚠️  Cloudinary not configured');
+  var upload = multer({ dest: 'uploads/' });
+}
 
 /* =======================
    DATABASE
 ======================= */
-const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT,
-  ssl: { rejectUnauthorized: false },
-});
+let db;
 
-db.getConnection((err, conn) => {
-  if (err) {
-    console.error("❌ DB error:", err.message);
-  } else {
-    console.log("✅ Connected to Railway MySQL");
-    conn.release();
-  }
-});
+try {
+  db = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    port: process.env.DB_PORT || 3306,
+    ssl: { rejectUnauthorized: false },
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+
+  db.getConnection((err, conn) => {
+    if (err) {
+      console.error("❌ DB Connection Error:", err.message);
+    } else {
+      console.log("✅ Connected to MySQL Database");
+      conn.release();
+    }
+  });
+} catch (error) {
+  console.error("❌ DB Setup Error:", error.message);
+}
 
 /* =======================
    INTASEND CONFIG
@@ -72,6 +128,12 @@ db.getConnection((err, conn) => {
 const INTASEND_SECRET_KEY = process.env.INTASEND_SECRET_KEY;
 const INTASEND_PUBLISHABLE_KEY = process.env.INTASEND_PUBLISHABLE_KEY;
 const INTASEND_API_URL = "https://payment.intasend.com/api/v1";
+
+if (INTASEND_SECRET_KEY) {
+  console.log('✅ Intasend configured');
+} else {
+  console.log('⚠️  Intasend not configured');
+}
 
 /* =======================
    JWT MIDDLEWARE
@@ -83,7 +145,7 @@ const verifyToken = (req, res, next) => {
   try {
     req.user = jwt.verify(auth.split(" ")[1], process.env.JWT_SECRET);
     next();
-  } catch {
+  } catch (error) {
     return res.status(401).json({ message: "Invalid token" });
   }
 };
@@ -97,6 +159,23 @@ const isAdmin = (req, res, next) => {
   }
   next();
 };
+
+/* =======================
+   HEALTH CHECK
+======================= */
+app.get("/", (req, res) => {
+  res.send("🚀 Mega-Odds API Running - Intasend M-Pesa Integrated ✅");
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "online",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: db ? "connected" : "disconnected",
+    intasend: INTASEND_SECRET_KEY ? "configured" : "not configured"
+  });
+});
 
 /* =======================
    AUTH ROUTES
@@ -119,13 +198,14 @@ app.post("/register", async (req, res) => {
           if (err.code === "ER_DUP_ENTRY") {
             return res.status(409).json({ message: "User already exists" });
           }
+          console.error("Register error:", err);
           return res.status(500).json({ message: "Database error" });
         }
         res.json({ message: "Registered successfully" });
       }
     );
   } catch (error) {
-    console.error(error);
+    console.error("Register error:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -138,7 +218,10 @@ app.post("/login", async (req, res) => {
   }
 
   db.query("SELECT * FROM users WHERE email = ?", [email], async (err, rows) => {
-    if (err) return res.status(500).json({ message: "Server error" });
+    if (err) {
+      console.error("Login error:", err);
+      return res.status(500).json({ message: "Server error" });
+    }
     if (!rows.length) return res.status(401).json({ message: "Invalid credentials" });
 
     const user = rows[0];
@@ -169,7 +252,10 @@ app.get("/features", verifyToken, (req, res) => {
   }
 
   db.query("SELECT * FROM features ORDER BY id DESC", (err, rows) => {
-    if (err) return res.status(500).json({ message: "DB error" });
+    if (err) {
+      console.error("Features error:", err);
+      return res.status(500).json({ message: "DB error" });
+    }
     res.json(rows);
   });
 });
@@ -182,7 +268,10 @@ app.post("/features", verifyToken, isAdmin, upload.single("image"), (req, res) =
     "INSERT INTO features (title, description, image_url) VALUES (?, ?, ?)",
     [title, description, image_url],
     (err) => {
-      if (err) return res.status(500).json({ message: "Create failed" });
+      if (err) {
+        console.error("Create feature error:", err);
+        return res.status(500).json({ message: "Create failed" });
+      }
       res.json({ message: "Feature added" });
     }
   );
@@ -201,14 +290,20 @@ app.put("/features/:id", verifyToken, isAdmin, upload.single("image"), (req, res
     : [title, description, req.params.id];
 
   db.query(sql, values, (err) => {
-    if (err) return res.status(500).json({ message: "Update failed" });
+    if (err) {
+      console.error("Update feature error:", err);
+      return res.status(500).json({ message: "Update failed" });
+    }
     res.json({ message: "Feature updated" });
   });
 });
 
 app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
   db.query("DELETE FROM features WHERE id=?", [req.params.id], (err) => {
-    if (err) return res.status(500).json({ message: "Delete failed" });
+    if (err) {
+      console.error("Delete feature error:", err);
+      return res.status(500).json({ message: "Delete failed" });
+    }
     res.json({ message: "Feature deleted" });
   });
 });
@@ -216,14 +311,12 @@ app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
 /* =======================
    PICKS ROUTES
 ======================= */
-
-// Get yesterday's picks (PUBLIC)
 app.get("/api/picks/yesterday", (req, res) => {
   db.query(
     "SELECT * FROM picks WHERE pick_type = 'yesterday' ORDER BY created_at DESC",
     (err, rows) => {
       if (err) {
-        console.error("DB error:", err);
+        console.error("Picks error:", err);
         return res.status(500).json({ message: "DB error" });
       }
       res.json(rows);
@@ -231,13 +324,12 @@ app.get("/api/picks/yesterday", (req, res) => {
   );
 });
 
-// Get today's picks (PUBLIC)
 app.get("/api/picks/today", (req, res) => {
   db.query(
     "SELECT * FROM picks WHERE pick_type = 'today' ORDER BY created_at DESC",
     (err, rows) => {
       if (err) {
-        console.error("DB error:", err);
+        console.error("Picks error:", err);
         return res.status(500).json({ message: "DB error" });
       }
       res.json(rows);
@@ -245,11 +337,10 @@ app.get("/api/picks/today", (req, res) => {
   );
 });
 
-// Get single pick by ID (PUBLIC)
 app.get("/api/picks/:id", (req, res) => {
   db.query("SELECT * FROM picks WHERE id = ?", [req.params.id], (err, rows) => {
     if (err) {
-      console.error("DB error:", err);
+      console.error("Pick error:", err);
       return res.status(500).json({ message: "DB error" });
     }
     if (!rows.length) {
@@ -259,16 +350,13 @@ app.get("/api/picks/:id", (req, res) => {
   });
 });
 
-// Create new pick (ADMIN ONLY)
 app.post("/api/picks", verifyToken, isAdmin, (req, res) => {
   const { team1, team2, time, prediction, odds, status, isVIP, pickType } = req.body;
 
-  // Validation
   if (!team1 || !team2 || !time || !pickType) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
-  // If VIP, lock prediction and odds
   const finalPrediction = isVIP ? "Locked" : prediction;
   const finalOdds = isVIP ? "--" : odds;
 
@@ -288,11 +376,9 @@ app.post("/api/picks", verifyToken, isAdmin, (req, res) => {
   );
 });
 
-// Update pick (ADMIN ONLY)
 app.put("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
   const { team1, team2, time, prediction, odds, status, isVIP } = req.body;
 
-  // If VIP, lock prediction and odds
   const finalPrediction = isVIP ? "Locked" : prediction;
   const finalOdds = isVIP ? "--" : odds;
 
@@ -312,7 +398,6 @@ app.put("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
   );
 });
 
-// Delete pick (ADMIN ONLY)
 app.delete("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
   db.query("DELETE FROM picks WHERE id=?", [req.params.id], (err, result) => {
     if (err) {
@@ -329,20 +414,18 @@ app.delete("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
 /* =======================
    INTASEND PAYMENT ROUTES
 ======================= */
-
-// Initiate M-Pesa STK Push
 app.post("/api/payment/initiate", verifyToken, async (req, res) => {
+  console.log('💳 Payment initiation request received');
+  
   const { amount, phone_number, plan_name } = req.body;
 
-  // Validate input
   if (!amount || !phone_number || !plan_name) {
     return res.status(400).json({ 
       success: false,
-      message: "Missing required fields: amount, phone_number, or plan_name" 
+      message: "Missing required fields" 
     });
   }
 
-  // Format phone number (remove +, spaces, ensure starts with 254)
   let formattedPhone = phone_number.replace(/[\s\+]/g, '');
   if (formattedPhone.startsWith('0')) {
     formattedPhone = '254' + formattedPhone.substring(1);
@@ -351,19 +434,17 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
     formattedPhone = '254' + formattedPhone;
   }
 
-  // Validate phone number format (254XXXXXXXXX)
   if (!/^254[17]\d{8}$/.test(formattedPhone)) {
     return res.status(400).json({ 
       success: false,
-      message: "Invalid Kenyan phone number format. Use 07XX XXX XXX or 254XXX XXX XXX" 
+      message: "Invalid phone number format" 
     });
   }
 
   try {
-    // Create unique reference
     const apiRef = `MEGA-${Date.now()}-${req.user.id}`;
 
-    // Prepare Intasend STK Push request
+    console.log('📞 Calling Intasend API...');
     const response = await axios.post(
       `${INTASEND_API_URL}/payment/mpesa-stk-push/`,
       {
@@ -377,13 +458,13 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
         headers: {
           "Authorization": `Bearer ${INTASEND_SECRET_KEY}`,
           "Content-Type": "application/json"
-        }
+        },
+        timeout: 30000
       }
     );
 
-    console.log("Intasend STK Push Response:", response.data);
+    console.log('✅ Intasend response:', response.data);
 
-    // Store payment record in database
     db.query(
       "INSERT INTO payments (user_id, amount, phone_number, plan_name, invoice_id, api_ref, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
       [
@@ -396,68 +477,53 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
         'PENDING'
       ],
       (err) => {
-        if (err) {
-          console.error("Error storing payment:", err);
-        }
+        if (err) console.error("Payment storage error:", err);
       }
     );
 
     res.json({
       success: true,
-      message: "STK Push sent successfully. Please check your phone.",
+      message: "STK Push sent successfully",
       invoice_id: response.data.invoice?.invoice_id || response.data.id,
-      tracking_id: response.data.id || response.data.invoice?.id,
+      tracking_id: response.data.id,
       api_ref: apiRef
     });
 
   } catch (error) {
-    console.error("Intasend STK Push Error:", error.response?.data || error.message);
+    console.error("💥 Intasend error:", error.response?.data || error.message);
     
     res.status(500).json({ 
       success: false,
-      message: error.response?.data?.error || error.response?.data?.detail || "Payment initiation failed. Please try again."
+      message: error.response?.data?.error || error.response?.data?.detail || "Payment initiation failed"
     });
   }
 });
 
-// Check payment status
 app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
   try {
     const response = await axios.get(
       `${INTASEND_API_URL}/payment/status/`,
       {
-        params: {
-          invoice_id: req.params.invoice_id
-        },
-        headers: {
-          "Authorization": `Bearer ${INTASEND_SECRET_KEY}`
-        }
+        params: { invoice_id: req.params.invoice_id },
+        headers: { "Authorization": `Bearer ${INTASEND_SECRET_KEY}` },
+        timeout: 15000
       }
     );
 
-    console.log("Payment Status Response:", response.data);
-
     const paymentState = response.data.invoice?.state || response.data.state;
 
-    // Update payment status in database
     if (paymentState === 'COMPLETE' || paymentState === 'COMPLETED') {
       db.query(
         "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ?",
-        [req.params.invoice_id],
-        (err) => {
-          if (err) console.error("Error updating payment status:", err);
-        }
+        [req.params.invoice_id]
       );
 
-      // Update user VIP status
       db.query(
         "UPDATE users SET is_vip = 1 WHERE id = ?",
-        [req.user.id],
-        (err) => {
-          if (err) console.error("Error updating VIP status:", err);
-          else console.log(`✅ User ${req.user.id} upgraded to VIP`);
-        }
+        [req.user.id]
       );
+
+      console.log(`✅ User ${req.user.id} upgraded to VIP`);
     }
 
     res.json({
@@ -467,79 +533,49 @@ app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Status Check Error:", error.response?.data || error.message);
-    
+    console.error("Status check error:", error.message);
     res.status(500).json({ 
       success: false,
-      message: "Failed to check payment status"
+      message: "Failed to check payment status" 
     });
   }
 });
 
-// Webhook for payment notifications
 app.post("/api/payment/webhook", express.raw({type: 'application/json'}), (req, res) => {
   try {
     const event = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     
-    console.log("📥 Payment Webhook Received:", JSON.stringify(event, null, 2));
+    console.log("📥 Webhook received:", event);
 
     const invoiceId = event.invoice?.invoice_id || event.invoice_id;
     const state = event.invoice?.state || event.state;
     const apiRef = event.invoice?.api_ref || event.api_ref;
 
     if (state === 'COMPLETE' || state === 'COMPLETED') {
-      // Update payment status
       db.query(
         "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ? OR api_ref = ?",
-        [invoiceId, apiRef],
-        (err, result) => {
-          if (err) {
-            console.error("Webhook payment update error:", err);
-          } else {
-            console.log(`✅ Payment ${invoiceId} marked as COMPLETE`);
-          }
-        }
+        [invoiceId, apiRef]
       );
 
-      // Get user from payment and update VIP status
       db.query(
         "SELECT user_id FROM payments WHERE invoice_id = ? OR api_ref = ?",
         [invoiceId, apiRef],
         (err, rows) => {
           if (!err && rows.length > 0) {
-            const userId = rows[0].user_id;
-            db.query(
-              "UPDATE users SET is_vip = 1 WHERE id = ?",
-              [userId],
-              (err) => {
-                if (err) {
-                  console.error("Webhook VIP update error:", err);
-                } else {
-                  console.log(`✅ User ${userId} upgraded to VIP via webhook`);
-                }
-              }
-            );
+            db.query("UPDATE users SET is_vip = 1 WHERE id = ?", [rows[0].user_id]);
+            console.log(`✅ User ${rows[0].user_id} upgraded via webhook`);
           }
-        }
-      );
-    } else if (state === 'FAILED') {
-      db.query(
-        "UPDATE payments SET status = 'FAILED' WHERE invoice_id = ? OR api_ref = ?",
-        [invoiceId, apiRef],
-        (err) => {
-          if (err) console.error("Webhook failed payment update error:", err);
         }
       );
     }
 
     res.status(200).json({ received: true });
   } catch (error) {
-    console.error("❌ Webhook Processing Error:", error);
+    console.error("Webhook error:", error);
     res.status(500).json({ error: "Webhook processing failed" });
   }
 });
 
-// Get user's payment history
 app.get("/api/payment/history", verifyToken, (req, res) => {
   db.query(
     "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC",
@@ -547,7 +583,7 @@ app.get("/api/payment/history", verifyToken, (req, res) => {
     (err, rows) => {
       if (err) {
         console.error("Payment history error:", err);
-        return res.status(500).json({ message: "Failed to fetch payment history" });
+        return res.status(500).json({ message: "Failed to fetch history" });
       }
       res.json(rows);
     }
@@ -555,16 +591,35 @@ app.get("/api/payment/history", verifyToken, (req, res) => {
 });
 
 /* =======================
-   HEALTH CHECK
+   ERROR HANDLER
 ======================= */
-app.get("/", (_, res) => {
-  res.send("🚀 Mega-Odds API Running - Intasend M-Pesa Integrated");
+app.use((err, req, res, next) => {
+  console.error('💥 Express error:', err);
+  res.status(500).json({ 
+    message: "Internal server error",
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
 /* =======================
    START SERVER
 ======================= */
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🔥 Server running on port ${PORT}`);
-  console.log(`💳 Intasend M-Pesa Integration Active`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`\n🔥 ========================================`);
+  console.log(`🔥 SERVER RUNNING ON PORT ${PORT}`);
+  console.log(`🔥 ========================================\n`);
+  console.log(`📍 Health: http://localhost:${PORT}/health`);
+  console.log(`💳 Intasend: ${INTASEND_SECRET_KEY ? '✅ Ready' : '❌ Not configured'}`);
+  console.log(`🗄️  Database: ${db ? '✅ Connected' : '❌ Disconnected'}`);
+  console.log(`\n🚀 Ready to accept requests!\n`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Server closed');
+    if (db) db.end();
+    process.exit(0);
+  });
 });
