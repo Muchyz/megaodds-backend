@@ -52,7 +52,7 @@ app.use(
   })
 );
 
-app.options('*', cors());
+app.options('/:all(.*)', cors());
 app.use(express.json());
 
 app.use((req, res, next) => {
