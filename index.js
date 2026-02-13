@@ -1,9 +1,8 @@
 // ==========================================
 // MEGA-ODDS BACKEND WITH M-PESA INTEGRATION
-// Production-Ready with Error Handling
+// Uses official intasend-node SDK (not raw axios)
 // ==========================================
 
-// Error handlers FIRST
 process.on('uncaughtException', (error) => {
   console.error('💥 UNCAUGHT EXCEPTION:', error.message);
   console.error('Stack:', error.stack);
@@ -13,18 +12,15 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('💥 UNHANDLED REJECTION:', reason);
 });
 
-// Load environment variables
 require("dotenv").config();
 
 console.log('🚀 Starting Mega-Odds Backend...');
 console.log('📅 Time:', new Date().toISOString());
 
-// Verify critical env vars
-const criticalVars = ['DB_HOST', 'JWT_SECRET', 'INTASEND_SECRET_KEY'];
+const criticalVars = ['DB_HOST', 'JWT_SECRET', 'INTASEND_SECRET_KEY', 'INTASEND_PUBLISHABLE_KEY'];
 const missingVars = criticalVars.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
   console.error('❌ Missing environment variables:', missingVars.join(', '));
-  console.error('⚠️  Server may not function correctly!');
 }
 
 const express = require("express");
@@ -35,7 +31,7 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
-const axios = require("axios");
+const IntaSend = require("intasend-node"); // ✅ Official SDK
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -56,12 +52,9 @@ app.use(
   })
 );
 
-// Handle preflight
 app.options('*', cors());
-
 app.use(express.json());
 
-// Request logging
 app.use((req, res, next) => {
   console.log(`📨 ${req.method} ${req.path}`);
   next();
@@ -123,17 +116,20 @@ try {
 }
 
 /* =======================
-   INTASEND CONFIG
-   ✅ FIXED: Correct API base URL
+   INTASEND SDK SETUP
+   ✅ Official intasend-node SDK
+   false = LIVE mode | true = sandbox/test mode
 ======================= */
-const INTASEND_SECRET_KEY = process.env.INTASEND_SECRET_KEY;
-const INTASEND_PUBLISHABLE_KEY = process.env.INTASEND_PUBLISHABLE_KEY;
-const INTASEND_API_URL = "https://api.intasend.com/api/v1"; // ✅ FIXED (was payment.intasend.com)
-
-if (INTASEND_SECRET_KEY) {
-  console.log('✅ Intasend configured');
-} else {
-  console.log('⚠️  Intasend not configured');
+let intasend;
+try {
+  intasend = new IntaSend(
+    process.env.INTASEND_PUBLISHABLE_KEY,
+    process.env.INTASEND_SECRET_KEY,
+    false // false = LIVE production mode
+  );
+  console.log('✅ Intasend SDK initialized (LIVE mode)');
+} catch (err) {
+  console.error('❌ Intasend SDK init error:', err.message);
 }
 
 /* =======================
@@ -142,7 +138,6 @@ if (INTASEND_SECRET_KEY) {
 const verifyToken = (req, res, next) => {
   const auth = req.headers.authorization;
   if (!auth) return res.status(401).json({ message: "No token provided" });
-
   try {
     req.user = jwt.verify(auth.split(" ")[1], process.env.JWT_SECRET);
     next();
@@ -174,7 +169,7 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     database: db ? "connected" : "disconnected",
-    intasend: INTASEND_SECRET_KEY ? "configured" : "not configured"
+    intasend: intasend ? "initialized" : "not initialized"
   });
 });
 
@@ -183,14 +178,11 @@ app.get("/health", (req, res) => {
 ======================= */
 app.post("/register", async (req, res) => {
   const { email, password } = req.body;
-
   if (!email || !password) {
     return res.status(400).json({ message: "Email and password are required" });
   }
-
   try {
     const hash = await bcrypt.hash(password, 10);
-
     db.query(
       "INSERT INTO users (email, password) VALUES (?, ?)",
       [email, hash],
@@ -213,11 +205,9 @@ app.post("/register", async (req, res) => {
 
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
-
   if (!email || !password) {
     return res.status(400).json({ message: "Email and password are required" });
   }
-
   db.query("SELECT * FROM users WHERE email = ?", [email], async (err, rows) => {
     if (err) {
       console.error("Login error:", err);
@@ -230,16 +220,10 @@ app.post("/login", async (req, res) => {
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
     const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-        is_vip: user.is_vip,
-        is_admin: user.is_admin,
-      },
+      { id: user.id, email: user.email, is_vip: user.is_vip, is_admin: user.is_admin },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
-
     res.json({ token, is_vip: user.is_vip, is_admin: user.is_admin });
   });
 });
@@ -251,12 +235,8 @@ app.get("/features", verifyToken, (req, res) => {
   if (Number(req.user.is_vip) !== 1) {
     return res.status(403).json({ message: "VIP only" });
   }
-
   db.query("SELECT * FROM features ORDER BY id DESC", (err, rows) => {
-    if (err) {
-      console.error("Features error:", err);
-      return res.status(500).json({ message: "DB error" });
-    }
+    if (err) return res.status(500).json({ message: "DB error" });
     res.json(rows);
   });
 });
@@ -264,15 +244,11 @@ app.get("/features", verifyToken, (req, res) => {
 app.post("/features", verifyToken, isAdmin, upload.single("image"), (req, res) => {
   const { title, description } = req.body;
   const image_url = req.file ? req.file.path : null;
-
   db.query(
     "INSERT INTO features (title, description, image_url) VALUES (?, ?, ?)",
     [title, description, image_url],
     (err) => {
-      if (err) {
-        console.error("Create feature error:", err);
-        return res.status(500).json({ message: "Create failed" });
-      }
+      if (err) return res.status(500).json({ message: "Create failed" });
       res.json({ message: "Feature added" });
     }
   );
@@ -281,30 +257,21 @@ app.post("/features", verifyToken, isAdmin, upload.single("image"), (req, res) =
 app.put("/features/:id", verifyToken, isAdmin, upload.single("image"), (req, res) => {
   const { title, description } = req.body;
   const image_url = req.file?.path;
-
   const sql = image_url
     ? "UPDATE features SET title=?, description=?, image_url=? WHERE id=?"
     : "UPDATE features SET title=?, description=? WHERE id=?";
-
   const values = image_url
     ? [title, description, image_url, req.params.id]
     : [title, description, req.params.id];
-
   db.query(sql, values, (err) => {
-    if (err) {
-      console.error("Update feature error:", err);
-      return res.status(500).json({ message: "Update failed" });
-    }
+    if (err) return res.status(500).json({ message: "Update failed" });
     res.json({ message: "Feature updated" });
   });
 });
 
 app.delete("/features/:id", verifyToken, isAdmin, (req, res) => {
   db.query("DELETE FROM features WHERE id=?", [req.params.id], (err) => {
-    if (err) {
-      console.error("Delete feature error:", err);
-      return res.status(500).json({ message: "Delete failed" });
-    }
+    if (err) return res.status(500).json({ message: "Delete failed" });
     res.json({ message: "Feature deleted" });
   });
 });
@@ -316,10 +283,7 @@ app.get("/api/picks/yesterday", (req, res) => {
   db.query(
     "SELECT * FROM picks WHERE pick_type = 'yesterday' ORDER BY created_at DESC",
     (err, rows) => {
-      if (err) {
-        console.error("Picks error:", err);
-        return res.status(500).json({ message: "DB error" });
-      }
+      if (err) return res.status(500).json({ message: "DB error" });
       res.json(rows);
     }
   );
@@ -329,10 +293,7 @@ app.get("/api/picks/today", (req, res) => {
   db.query(
     "SELECT * FROM picks WHERE pick_type = 'today' ORDER BY created_at DESC",
     (err, rows) => {
-      if (err) {
-        console.error("Picks error:", err);
-        return res.status(500).json({ message: "DB error" });
-      }
+      if (err) return res.status(500).json({ message: "DB error" });
       res.json(rows);
     }
   );
@@ -340,60 +301,39 @@ app.get("/api/picks/today", (req, res) => {
 
 app.get("/api/picks/:id", (req, res) => {
   db.query("SELECT * FROM picks WHERE id = ?", [req.params.id], (err, rows) => {
-    if (err) {
-      console.error("Pick error:", err);
-      return res.status(500).json({ message: "DB error" });
-    }
-    if (!rows.length) {
-      return res.status(404).json({ message: "Pick not found" });
-    }
+    if (err) return res.status(500).json({ message: "DB error" });
+    if (!rows.length) return res.status(404).json({ message: "Pick not found" });
     res.json(rows[0]);
   });
 });
 
 app.post("/api/picks", verifyToken, isAdmin, (req, res) => {
   const { team1, team2, time, prediction, odds, status, isVIP, pickType } = req.body;
-
   if (!team1 || !team2 || !time || !pickType) {
     return res.status(400).json({ message: "Missing required fields" });
   }
-
   const finalPrediction = isVIP ? "Locked" : prediction;
   const finalOdds = isVIP ? "--" : odds;
-
   db.query(
     "INSERT INTO picks (team1, team2, time, prediction, odds, status, is_vip, pick_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     [team1, team2, time, finalPrediction, finalOdds, status || "Pending", isVIP ? 1 : 0, pickType],
     (err, result) => {
-      if (err) {
-        console.error("Create pick error:", err);
-        return res.status(500).json({ message: "Failed to create pick" });
-      }
-      res.status(201).json({ 
-        message: "Pick created successfully",
-        id: result.insertId 
-      });
+      if (err) return res.status(500).json({ message: "Failed to create pick" });
+      res.status(201).json({ message: "Pick created successfully", id: result.insertId });
     }
   );
 });
 
 app.put("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
   const { team1, team2, time, prediction, odds, status, isVIP } = req.body;
-
   const finalPrediction = isVIP ? "Locked" : prediction;
   const finalOdds = isVIP ? "--" : odds;
-
   db.query(
     "UPDATE picks SET team1=?, team2=?, time=?, prediction=?, odds=?, status=?, is_vip=? WHERE id=?",
     [team1, team2, time, finalPrediction, finalOdds, status, isVIP ? 1 : 0, req.params.id],
     (err, result) => {
-      if (err) {
-        console.error("Update pick error:", err);
-        return res.status(500).json({ message: "Failed to update pick" });
-      }
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "Pick not found" });
-      }
+      if (err) return res.status(500).json({ message: "Failed to update pick" });
+      if (result.affectedRows === 0) return res.status(404).json({ message: "Pick not found" });
       res.json({ message: "Pick updated successfully" });
     }
   );
@@ -401,20 +341,16 @@ app.put("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
 
 app.delete("/api/picks/:id", verifyToken, isAdmin, (req, res) => {
   db.query("DELETE FROM picks WHERE id=?", [req.params.id], (err, result) => {
-    if (err) {
-      console.error("Delete pick error:", err);
-      return res.status(500).json({ message: "Failed to delete pick" });
-    }
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Pick not found" });
-    }
+    if (err) return res.status(500).json({ message: "Failed to delete pick" });
+    if (result.affectedRows === 0) return res.status(404).json({ message: "Pick not found" });
     res.json({ message: "Pick deleted successfully" });
   });
 });
 
-/* =======================
-   INTASEND PAYMENT ROUTES
-======================= */
+/* =======================================
+   PAYMENT ROUTES — intasend-node SDK
+   ✅ SDK handles correct URLs & auth
+======================================= */
 
 // POST /api/payment/initiate
 app.post("/api/payment/initiate", verifyToken, async (req, res) => {
@@ -423,14 +359,11 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
   const { amount, phone_number, plan_name } = req.body;
 
   if (!amount || !phone_number || !plan_name) {
-    return res.status(400).json({
-      success: false,
-      message: "Missing required fields"
-    });
+    return res.status(400).json({ success: false, message: "Missing required fields" });
   }
 
-  // Format phone number to 254XXXXXXXXX
-  let formattedPhone = phone_number.replace(/[\s\+]/g, '');
+  // Format phone to 254XXXXXXXXX
+  let formattedPhone = phone_number.replace(/[\s\+\-]/g, '');
   if (formattedPhone.startsWith('0')) {
     formattedPhone = '254' + formattedPhone.substring(1);
   }
@@ -441,114 +374,101 @@ app.post("/api/payment/initiate", verifyToken, async (req, res) => {
   if (!/^254[17]\d{8}$/.test(formattedPhone)) {
     return res.status(400).json({
       success: false,
-      message: "Invalid phone number format. Use 07XXXXXXXX or 254XXXXXXXXX"
+      message: "Invalid phone number. Use 07XXXXXXXX or 254XXXXXXXXX"
     });
+  }
+
+  if (!intasend) {
+    return res.status(500).json({ success: false, message: "Payment service not configured" });
   }
 
   try {
     const apiRef = `MEGA-${Date.now()}-${req.user.id}`;
 
-    console.log('📞 Calling Intasend STK Push API...');
-    console.log('📱 Phone:', formattedPhone);
-    console.log('💰 Amount:', amount);
+    console.log('📞 Sending STK Push via Intasend SDK...');
+    console.log('   Phone:', formattedPhone, '| Amount:', amount, '| Plan:', plan_name);
 
-    // ✅ FIXED: Correct Intasend API URL (api.intasend.com not payment.intasend.com)
-    const response = await axios.post(
-      `${INTASEND_API_URL}/payment/mpesa-stk-push/`,
-      {
-        amount: parseFloat(amount),
-        phone_number: formattedPhone,
-        api_ref: apiRef,
-        narrative: `Payment for ${plan_name}`,
-        currency: "KES"
-      },
-      {
-        headers: {
-          "Authorization": `Bearer ${INTASEND_SECRET_KEY}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000
-      }
-    );
+    // ✅ Official SDK call — handles all auth & endpoint routing internally
+    const collection = intasend.collection();
+    const response = await collection.mpesaStkPush({
+      first_name: "Customer",
+      last_name: "",
+      email: req.user.email || "customer@megaodds.com",
+      host: "https://megaodds.vercel.app",
+      amount: parseFloat(amount),
+      phone_number: formattedPhone,
+      api_ref: apiRef,
+      narrative: `Payment for ${plan_name}`
+    });
 
-    console.log('✅ Intasend STK response:', JSON.stringify(response.data));
+    console.log('✅ STK Push response:', JSON.stringify(response));
 
-    const invoiceId = response.data.invoice?.invoice_id || response.data.id;
+    const invoiceId = response.invoice?.invoice_id
+      || response.invoice?.id
+      || response.id
+      || apiRef;
 
-    // Store payment record in DB
+    // Save payment record
     db.query(
       "INSERT INTO payments (user_id, amount, phone_number, plan_name, invoice_id, api_ref, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
       [req.user.id, amount, formattedPhone, plan_name, invoiceId, apiRef, 'PENDING'],
       (err) => {
-        if (err) console.error("⚠️ Payment storage error:", err.message);
-        else console.log('✅ Payment record saved, invoice_id:', invoiceId);
+        if (err) console.error("⚠️ Payment DB save error:", err.message);
+        else console.log('✅ Payment saved, invoice_id:', invoiceId);
       }
     );
 
     res.json({
       success: true,
-      message: "STK Push sent successfully",
+      message: "STK Push sent! Check your phone and enter your M-Pesa PIN.",
       invoice_id: invoiceId,
-      tracking_id: response.data.id,
       api_ref: apiRef
     });
 
   } catch (error) {
-    // ✅ Enhanced error logging so you can see exactly what Intasend returns
-    console.error("💥 Intasend error status:", error.response?.status);
-    console.error("💥 Intasend error data:", JSON.stringify(error.response?.data));
-    console.error("💥 Intasend error message:", error.message);
+    const errData = error?.response?.data || error?.message || String(error);
+    console.error("💥 STK Push failed:", errData);
 
-    res.status(500).json({
-      success: false,
-      message:
-        error.response?.data?.error ||
-        error.response?.data?.detail ||
-        error.response?.data?.message ||
-        "Payment initiation failed. Please try again."
-    });
+    let errorMessage = "Payment initiation failed. Please try again.";
+    if (error?.response?.data) {
+      const d = error.response.data;
+      errorMessage = d.detail || d.error || d.message || errorMessage;
+    } else if (typeof error?.message === 'string') {
+      errorMessage = error.message;
+    }
+
+    res.status(500).json({ success: false, message: errorMessage });
   }
 });
 
 // GET /api/payment/status/:invoice_id
 app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
+  const { invoice_id } = req.params;
+  console.log('🔍 Checking payment status:', invoice_id);
+
+  if (!intasend) {
+    return res.status(500).json({ success: false, message: "Payment service not configured" });
+  }
+
   try {
-    console.log('🔍 Checking payment status for invoice:', req.params.invoice_id);
+    // ✅ SDK status check
+    const collection = intasend.collection();
+    const response = await collection.status(invoice_id);
 
-    // ✅ FIXED: Intasend status check is POST not GET, with body not query params
-    const response = await axios.post(
-      `${INTASEND_API_URL}/payment/status/`,
-      { invoice_id: req.params.invoice_id },
-      {
-        headers: {
-          "Authorization": `Bearer ${INTASEND_SECRET_KEY}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 15000
-      }
-    );
+    console.log('✅ Status response:', JSON.stringify(response));
 
-    console.log('✅ Status response:', JSON.stringify(response.data));
-
-    const paymentState = response.data.invoice?.state || response.data.state;
+    const paymentState = response.invoice?.state || response.state || response.status;
 
     if (paymentState === 'COMPLETE' || paymentState === 'COMPLETED') {
-      // Update payment record
       db.query(
         "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ?",
-        [req.params.invoice_id],
-        (err) => {
-          if (err) console.error("⚠️ Payment update error:", err.message);
-        }
+        [invoice_id]
       );
-
-      // Upgrade user to VIP
       db.query(
         "UPDATE users SET is_vip = 1 WHERE id = ?",
         [req.user.id],
         (err) => {
-          if (err) console.error("⚠️ VIP upgrade error:", err.message);
-          else console.log(`✅ User ${req.user.id} upgraded to VIP`);
+          if (!err) console.log(`✅ User ${req.user.id} upgraded to VIP`);
         }
       );
     }
@@ -556,18 +476,12 @@ app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
     res.json({
       success: true,
       status: paymentState,
-      invoice: response.data.invoice || response.data
+      invoice: response.invoice || response
     });
 
   } catch (error) {
-    console.error("💥 Status check error status:", error.response?.status);
-    console.error("💥 Status check error data:", JSON.stringify(error.response?.data));
-    console.error("💥 Status check error message:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to check payment status"
-    });
+    console.error("💥 Status check error:", error?.response?.data || error?.message);
+    res.status(500).json({ success: false, message: "Failed to check payment status" });
   }
 });
 
@@ -575,7 +489,6 @@ app.get("/api/payment/status/:invoice_id", verifyToken, async (req, res) => {
 app.post("/api/payment/webhook", express.raw({ type: 'application/json' }), (req, res) => {
   try {
     const event = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-
     console.log("📥 Webhook received:", JSON.stringify(event));
 
     const invoiceId = event.invoice?.invoice_id || event.invoice_id;
@@ -585,25 +498,15 @@ app.post("/api/payment/webhook", express.raw({ type: 'application/json' }), (req
     if (state === 'COMPLETE' || state === 'COMPLETED') {
       db.query(
         "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ? OR api_ref = ?",
-        [invoiceId, apiRef],
-        (err) => {
-          if (err) console.error("⚠️ Webhook payment update error:", err.message);
-        }
+        [invoiceId, apiRef]
       );
-
       db.query(
         "SELECT user_id FROM payments WHERE invoice_id = ? OR api_ref = ?",
         [invoiceId, apiRef],
         (err, rows) => {
           if (!err && rows.length > 0) {
-            db.query(
-              "UPDATE users SET is_vip = 1 WHERE id = ?",
-              [rows[0].user_id],
-              (err2) => {
-                if (err2) console.error("⚠️ Webhook VIP upgrade error:", err2.message);
-                else console.log(`✅ User ${rows[0].user_id} upgraded via webhook`);
-              }
-            );
+            db.query("UPDATE users SET is_vip = 1 WHERE id = ?", [rows[0].user_id]);
+            console.log(`✅ User ${rows[0].user_id} upgraded via webhook`);
           }
         }
       );
@@ -622,10 +525,7 @@ app.get("/api/payment/history", verifyToken, (req, res) => {
     "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC",
     [req.user.id],
     (err, rows) => {
-      if (err) {
-        console.error("Payment history error:", err);
-        return res.status(500).json({ message: "Failed to fetch history" });
-      }
+      if (err) return res.status(500).json({ message: "Failed to fetch history" });
       res.json(rows);
     }
   );
@@ -636,10 +536,7 @@ app.get("/api/payment/history", verifyToken, (req, res) => {
 ======================= */
 app.use((err, req, res, next) => {
   console.error('💥 Express error:', err);
-  res.status(500).json({
-    message: "Internal server error",
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
+  res.status(500).json({ message: "Internal server error" });
 });
 
 /* =======================
@@ -650,16 +547,14 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🔥 SERVER RUNNING ON PORT ${PORT}`);
   console.log(`🔥 ========================================\n`);
   console.log(`📍 Health: http://localhost:${PORT}/health`);
-  console.log(`💳 Intasend: ${INTASEND_SECRET_KEY ? '✅ Ready' : '❌ Not configured'}`);
-  console.log(`🗄️  Database: ${db ? '✅ Connected' : '❌ Disconnected'}`);
-  console.log(`\n🚀 Ready to accept requests!\n`);
+  console.log(`💳 Intasend: ${intasend ? '✅ SDK Ready (LIVE)' : '❌ Not initialized'}`);
+  console.log(`🗄️  Database: ${db ? '✅ Connected' : '❌ Not connected'}`);
+  console.log(`\n🚀 Ready!\n`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('👋 SIGTERM received, shutting down gracefully...');
+  console.log('👋 SIGTERM received, shutting down...');
   server.close(() => {
-    console.log('✅ Server closed');
     if (db) db.end();
     process.exit(0);
   });
