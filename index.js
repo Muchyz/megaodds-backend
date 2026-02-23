@@ -41,6 +41,7 @@ const { upload }    = require("./services/cloudinary");
 // ── Routes ──────────────────────────────────
 app.use("/",            require("./routes/auth")(db));
 app.use("/api/picks",   require("./routes/picks")(db));
+app.use("/api/reviews", require("./routes/reviews")(db));  // ← NEW
 app.use("/features",    require("./routes/features")(db, upload));
 app.use("/api/payment", require("./routes/payments")(db, intasend));
 
