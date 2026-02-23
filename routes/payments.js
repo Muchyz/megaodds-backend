@@ -37,11 +37,14 @@ module.exports = (db, intasend) => {
       const invoiceId =
         response.invoice?.invoice_id || response.invoice?.id || response.id || apiRef;
 
-      db.query(
-        "INSERT INTO payments (user_id, amount, phone_number, plan_name, invoice_id, api_ref, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [req.user.id, amount, phone, plan_name, invoiceId, apiRef, "PENDING"],
-        (err) => { if (err) console.error("⚠️ Payment DB save error:", err.message); }
-      );
+      try {
+        await db.query(
+          "INSERT INTO payments (user_id, amount, phone_number, plan_name, invoice_id, api_ref, status) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+          [req.user.id, amount, phone, plan_name, invoiceId, apiRef, "PENDING"]
+        );
+      } catch (err) {
+        console.error("⚠️ Payment DB save error:", err.message);
+      }
 
       res.json({ success: true, message: "STK Push sent! Enter your M-Pesa PIN.", invoice_id: invoiceId, api_ref: apiRef });
     } catch (error) {
@@ -59,8 +62,8 @@ module.exports = (db, intasend) => {
       const paymentState = response.invoice?.state || response.state || response.status;
 
       if (paymentState === "COMPLETE" || paymentState === "COMPLETED") {
-        db.query("UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ?", [req.params.invoice_id]);
-        db.query("UPDATE users SET is_vip = 1 WHERE id = ?", [req.user.id]);
+        await db.query("UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = $1", [req.params.invoice_id]);
+        await db.query("UPDATE users SET is_vip = 1 WHERE id = $1", [req.user.id]);
       }
       res.json({ success: true, status: paymentState, invoice: response.invoice || response });
     } catch (error) {
@@ -68,7 +71,7 @@ module.exports = (db, intasend) => {
     }
   });
 
-  router.post("/webhook", express.raw({ type: "application/json" }), (req, res) => {
+  router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
     try {
       const event = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
       const invoiceId = event.invoice?.invoice_id || event.invoice_id;
@@ -76,13 +79,18 @@ module.exports = (db, intasend) => {
       const apiRef    = event.invoice?.api_ref    || event.api_ref;
 
       if (state === "COMPLETE" || state === "COMPLETED") {
-        db.query("UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = ? OR api_ref = ?", [invoiceId, apiRef]);
-        db.query("SELECT user_id FROM payments WHERE invoice_id = ? OR api_ref = ?", [invoiceId, apiRef], (err, rows) => {
-          if (!err && rows.length > 0) {
-            db.query("UPDATE users SET is_vip = 1 WHERE id = ?", [rows[0].user_id]);
-            console.log(`✅ User ${rows[0].user_id} upgraded via webhook`);
-          }
-        });
+        await db.query(
+          "UPDATE payments SET status = 'COMPLETE' WHERE invoice_id = $1 OR api_ref = $2",
+          [invoiceId, apiRef]
+        );
+        const result = await db.query(
+          "SELECT user_id FROM payments WHERE invoice_id = $1 OR api_ref = $2",
+          [invoiceId, apiRef]
+        );
+        if (result.rows.length > 0) {
+          await db.query("UPDATE users SET is_vip = 1 WHERE id = $1", [result.rows[0].user_id]);
+          console.log(`✅ User ${result.rows[0].user_id} upgraded via webhook`);
+        }
       }
       res.status(200).json({ received: true });
     } catch (error) {
@@ -90,15 +98,16 @@ module.exports = (db, intasend) => {
     }
   });
 
-  router.get("/history", verifyToken, (req, res) => {
-    db.query(
-      "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC",
-      [req.user.id],
-      (err, rows) => {
-        if (err) return res.status(500).json({ message: "Failed to fetch history" });
-        res.json(rows);
-      }
-    );
+  router.get("/history", verifyToken, async (req, res) => {
+    try {
+      const result = await db.query(
+        "SELECT * FROM payments WHERE user_id = $1 ORDER BY created_at DESC",
+        [req.user.id]
+      );
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ message: "Failed to fetch history" });
+    }
   });
 
   return router;

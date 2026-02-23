@@ -6,38 +6,42 @@ module.exports = (db) => {
   const router = express.Router();
 
   // Public: yesterday's picks
-  router.get("/yesterday", (_req, res) => {
-    db.query(
-      "SELECT * FROM picks WHERE pick_type = 'yesterday' ORDER BY created_at DESC",
-      (err, rows) => {
-        if (err) return res.status(500).json({ message: "DB error" });
-        res.json(rows);
-      }
-    );
+  router.get("/yesterday", async (_req, res) => {
+    try {
+      const result = await db.query(
+        "SELECT * FROM picks WHERE pick_type = 'yesterday' ORDER BY created_at DESC"
+      );
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ message: "DB error" });
+    }
   });
 
   // Public: today's picks
-  router.get("/today", (_req, res) => {
-    db.query(
-      "SELECT * FROM picks WHERE pick_type = 'today' ORDER BY created_at DESC",
-      (err, rows) => {
-        if (err) return res.status(500).json({ message: "DB error" });
-        res.json(rows);
-      }
-    );
+  router.get("/today", async (_req, res) => {
+    try {
+      const result = await db.query(
+        "SELECT * FROM picks WHERE pick_type = 'today' ORDER BY created_at DESC"
+      );
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ message: "DB error" });
+    }
   });
 
   // Public: single pick
-  router.get("/:id", (req, res) => {
-    db.query("SELECT * FROM picks WHERE id = ?", [req.params.id], (err, rows) => {
-      if (err) return res.status(500).json({ message: "DB error" });
-      if (!rows.length) return res.status(404).json({ message: "Pick not found" });
-      res.json(rows[0]);
-    });
+  router.get("/:id", async (req, res) => {
+    try {
+      const result = await db.query("SELECT * FROM picks WHERE id = $1", [req.params.id]);
+      if (!result.rows.length) return res.status(404).json({ message: "Pick not found" });
+      res.json(result.rows[0]);
+    } catch (err) {
+      res.status(500).json({ message: "DB error" });
+    }
   });
 
   // Admin: create pick
-  router.post("/", verifyToken, isAdmin, (req, res) => {
+  router.post("/", verifyToken, isAdmin, async (req, res) => {
     const { team1, team2, time, prediction, odds, status, isVIP, pickType } = req.body;
 
     if (!team1 || !team2 || !time || !pickType)
@@ -46,43 +50,47 @@ module.exports = (db) => {
     const finalPrediction = isVIP ? "Locked" : (prediction || "");
     const finalOdds       = isVIP ? "--"      : (odds       || "");
 
-    db.query(
-      "INSERT INTO picks (team1, team2, time, prediction, odds, status, is_vip, pick_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [team1, team2, time, finalPrediction, finalOdds, status || "Pending", isVIP ? 1 : 0, pickType],
-      (err, result) => {
-        if (err) return res.status(500).json({ message: "Failed to create pick" });
-        res.status(201).json({ message: "Pick created successfully", id: result.insertId });
-      }
-    );
+    try {
+      const result = await db.query(
+        "INSERT INTO picks (team1, team2, time, prediction, odds, status, is_vip, pick_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        [team1, team2, time, finalPrediction, finalOdds, status || "Pending", isVIP ? 1 : 0, pickType]
+      );
+      res.status(201).json({ message: "Pick created successfully", id: result.rows[0].id });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to create pick" });
+    }
   });
 
   // Admin: update pick
-  router.put("/:id", verifyToken, isAdmin, (req, res) => {
+  router.put("/:id", verifyToken, isAdmin, async (req, res) => {
     const { team1, team2, time, prediction, odds, status, isVIP } = req.body;
 
     const finalPrediction = isVIP ? "Locked" : (prediction || "");
     const finalOdds       = isVIP ? "--"      : (odds       || "");
 
-    db.query(
-      "UPDATE picks SET team1=?, team2=?, time=?, prediction=?, odds=?, status=?, is_vip=? WHERE id=?",
-      [team1, team2, time, finalPrediction, finalOdds, status, isVIP ? 1 : 0, req.params.id],
-      (err, result) => {
-        if (err) return res.status(500).json({ message: "Failed to update pick" });
-        if (result.affectedRows === 0)
-          return res.status(404).json({ message: "Pick not found" });
-        res.json({ message: "Pick updated successfully" });
-      }
-    );
+    try {
+      const result = await db.query(
+        "UPDATE picks SET team1=$1, team2=$2, time=$3, prediction=$4, odds=$5, status=$6, is_vip=$7 WHERE id=$8",
+        [team1, team2, time, finalPrediction, finalOdds, status, isVIP ? 1 : 0, req.params.id]
+      );
+      if (result.rowCount === 0)
+        return res.status(404).json({ message: "Pick not found" });
+      res.json({ message: "Pick updated successfully" });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to update pick" });
+    }
   });
 
   // Admin: delete pick
-  router.delete("/:id", verifyToken, isAdmin, (req, res) => {
-    db.query("DELETE FROM picks WHERE id = ?", [req.params.id], (err, result) => {
-      if (err) return res.status(500).json({ message: "Failed to delete pick" });
-      if (result.affectedRows === 0)
+  router.delete("/:id", verifyToken, isAdmin, async (req, res) => {
+    try {
+      const result = await db.query("DELETE FROM picks WHERE id = $1", [req.params.id]);
+      if (result.rowCount === 0)
         return res.status(404).json({ message: "Pick not found" });
       res.json({ message: "Pick deleted successfully" });
-    });
+    } catch (err) {
+      res.status(500).json({ message: "Failed to delete pick" });
+    }
   });
 
   return router;

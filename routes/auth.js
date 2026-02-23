@@ -13,33 +13,29 @@ module.exports = (db) => {
 
     try {
       const hash = await bcrypt.hash(password, 10);
-      db.query(
-        "INSERT INTO users (email, password) VALUES (?, ?)",
-        [email, hash],
-        (err) => {
-          if (err) {
-            if (err.code === "ER_DUP_ENTRY")
-              return res.status(409).json({ message: "User already exists" });
-            return res.status(500).json({ message: "Database error" });
-          }
-          res.json({ message: "Registered successfully" });
-        }
+      await db.query(
+        "INSERT INTO users (email, password) VALUES ($1, $2)",
+        [email, hash]
       );
-    } catch {
+      res.json({ message: "Registered successfully" });
+    } catch (err) {
+      if (err.code === "23505")
+        return res.status(409).json({ message: "User already exists" });
       res.status(500).json({ message: "Server error" });
     }
   });
 
-  router.post("/login", (req, res) => {
+  router.post("/login", async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password)
       return res.status(400).json({ message: "Email and password are required" });
 
-    db.query("SELECT * FROM users WHERE email = ?", [email], async (err, rows) => {
-      if (err) return res.status(500).json({ message: "Server error" });
-      if (!rows.length) return res.status(401).json({ message: "Invalid credentials" });
+    try {
+      const result = await db.query("SELECT * FROM users WHERE email = $1", [email]);
+      if (!result.rows.length)
+        return res.status(401).json({ message: "Invalid credentials" });
 
-      const user = rows[0];
+      const user = result.rows[0];
       const ok = await bcrypt.compare(password, user.password);
       if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
@@ -49,7 +45,9 @@ module.exports = (db) => {
         { expiresIn: "7d" }
       );
       res.json({ token, is_vip: user.is_vip, is_admin: user.is_admin });
-    });
+    } catch (err) {
+      res.status(500).json({ message: "Server error" });
+    }
   });
 
   return router;
