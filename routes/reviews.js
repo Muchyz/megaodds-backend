@@ -8,24 +8,44 @@ module.exports = (db) => {
   const express = require("express");
   const router  = express.Router();
 
-  // ── GET all visible reviews (public) ───────────────────────────
+  // ── Mask helpers (server-side, for public endpoint) ─────────────
+  const maskEmail = (email) => {
+    if (!email) return '';
+    const [user, domain] = email.split('@');
+    if (user.length <= 3) return `${user[0]}***@${domain}`;
+    return `${user.substring(0, 2)}***${user.slice(-1)}@${domain}`;
+  };
+
+  const maskPhone = (phone) => {
+    if (!phone || phone.length < 10) return phone;
+    return `${phone.substring(0, 7)}***${phone.slice(-3)}`;
+  };
+
+  // ── GET all visible reviews (public) — email masked, phone masked ─
   router.get("/", async (req, res) => {
     try {
       const result = await db.query(
         `SELECT id, name, location, badge, rating, review_text,
-                status, verified, member_since, likes, created_at
+                status, verified, member_since, likes, created_at,
+                email, phone
          FROM reviews
          WHERE is_visible = TRUE
          ORDER BY created_at DESC`
       );
-      res.json(result.rows);
+      // Mask sensitive fields before sending to public
+      const rows = result.rows.map(r => ({
+        ...r,
+        email: maskEmail(r.email),
+        phone: maskPhone(r.phone),
+      }));
+      res.json(rows);
     } catch (err) {
       console.error("GET /api/reviews:", err.message);
       res.status(500).json({ message: "Failed to fetch reviews" });
     }
   });
 
-  // ── GET all reviews including hidden (admin) ────────────────────
+  // ── GET all reviews unmasked (admin only) ───────────────────────
   router.get("/admin", async (req, res) => {
     try {
       const result = await db.query(
@@ -42,7 +62,7 @@ module.exports = (db) => {
   router.post("/", async (req, res) => {
     const {
       name, location, badge, rating, review_text,
-      status, verified, member_since, likes, is_visible,
+      status, verified, member_since, email, phone, likes, is_visible,
     } = req.body;
 
     if (!name || !review_text) {
@@ -52,8 +72,9 @@ module.exports = (db) => {
     try {
       const result = await db.query(
         `INSERT INTO reviews
-           (name, location, badge, rating, review_text, status, verified, member_since, likes, is_visible)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           (name, location, badge, rating, review_text, status,
+            verified, member_since, email, phone, likes, is_visible)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING id`,
         [
           name,
@@ -64,6 +85,8 @@ module.exports = (db) => {
           status       ?? "offline",
           verified     ?? true,
           member_since ?? "",
+          email        ?? "",
+          phone        ?? "",
           likes        ?? 0,
           is_visible   ?? true,
         ]
@@ -80,17 +103,18 @@ module.exports = (db) => {
     const { id } = req.params;
     const {
       name, location, badge, rating, review_text,
-      status, verified, member_since, likes, is_visible,
+      status, verified, member_since, email, phone, likes, is_visible,
     } = req.body;
 
     try {
       await db.query(
         `UPDATE reviews
          SET name=$1, location=$2, badge=$3, rating=$4, review_text=$5,
-             status=$6, verified=$7, member_since=$8, likes=$9,
-             is_visible=$10, updated_at=CURRENT_TIMESTAMP
-         WHERE id=$11`,
-        [name, location, badge, rating, review_text, status, verified, member_since, likes, is_visible, id]
+             status=$6, verified=$7, member_since=$8, email=$9, phone=$10,
+             likes=$11, is_visible=$12, updated_at=CURRENT_TIMESTAMP
+         WHERE id=$13`,
+        [name, location, badge, rating, review_text, status,
+         verified, member_since, email, phone, likes, is_visible, id]
       );
       res.json({ message: "Review updated" });
     } catch (err) {
