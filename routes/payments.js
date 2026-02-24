@@ -40,7 +40,7 @@ module.exports = (db, paystackClient) => {
     try {
       const apiRef = reference_number || `MEGA-${Date.now()}-${req.user.id}`;
       const provider = detectProvider(phone);
-      const localPhone = phone.replace(/^254/, "0"); // Paystack Kenya needs 07XX format
+      const localPhone = "+" + phone; // Paystack Kenya needs 07XX format
 
       const chargePayload = {
         email: req.user.email || "customer@megaodds.com",
