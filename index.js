@@ -2,11 +2,11 @@
 // MEGA-ODDS BACKEND — Modular Entry Point
 // ==========================================
 
-process.on('uncaughtException', (error) => {
-  console.error('💥 UNCAUGHT EXCEPTION:', error.message);
+process.on("uncaughtException", (error) => {
+  console.error("💥 UNCAUGHT EXCEPTION:", error.message);
 });
-process.on('unhandledRejection', (reason) => {
-  console.error('💥 UNHANDLED REJECTION:', reason);
+process.on("unhandledRejection", (reason) => {
+  console.error("💥 UNHANDLED REJECTION:", reason);
 });
 
 require("dotenv").config();
@@ -17,33 +17,45 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ── Middleware ──────────────────────────────
-app.use(cors({
-  origin: [
-    "https://megaodds.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173"
-  ],
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
-app.use(express.json());
+app.use(
+  cors({
+    origin: [
+      "https://megaodds.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:5173",
+    ],
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// IMPORTANT: webhook route needs raw body — mount BEFORE express.json()
+// express.json() is applied per-route in the payments router for all other routes
+app.use((req, res, next) => {
+  if (req.originalUrl === "/api/payment/webhook") {
+    next(); // skip global json parsing; payments router handles it raw
+  } else {
+    express.json()(req, res, next);
+  }
+});
+
 app.use((req, _res, next) => {
   console.log(`📨 ${req.method} ${req.path}`);
   next();
 });
 
-// ── Shared services (db, intasend, cloudinary) ──
-const { db }        = require("./services/db");
-const { intasend }  = require("./services/intasend");
-const { upload }    = require("./services/cloudinary");
+// ── Shared services ─────────────────────────
+const { db }            = require("./services/db");
+const { paystackClient } = require("./services/paystack"); // ← replaced intasend
+const { upload }        = require("./services/cloudinary");
 
 // ── Routes ──────────────────────────────────
 app.use("/",            require("./routes/auth")(db));
 app.use("/api/picks",   require("./routes/picks")(db));
-app.use("/api/reviews", require("./routes/reviews")(db));  // ← NEW
+app.use("/api/reviews", require("./routes/reviews")(db));
 app.use("/features",    require("./routes/features")(db, upload));
-app.use("/api/payment", require("./routes/payments")(db, intasend));
+app.use("/api/payment", require("./routes/payments")(db, paystackClient)); // ← updated
 
 // ── Health ──────────────────────────────────
 app.get("/health", (_req, res) => {
@@ -52,7 +64,7 @@ app.get("/health", (_req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     database: db ? "connected" : "disconnected",
-    intasend: intasend ? "initialized" : "not initialized",
+    paystack: paystackClient ? "initialized" : "not initialized",
   });
 });
 
